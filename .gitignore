@@ -1,0 +1,28 @@
+# Python / Virtual Environments
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+env/
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# IDE / Editor specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS Generated Files
+Thumbs.db
+.DS_Store
+
+# Output or Generated Visualizations (if your code saves charts locally)
+outputs/
+*.png
+*.jpg
+*.pdf
