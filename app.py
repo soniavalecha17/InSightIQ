@@ -11,6 +11,10 @@ from analytics.cleaner import DataCleaner
 from analytics.statistics import StatisticalAnalyzer
 from analytics.insights import InsightGenerator
 
+# Phase 2A Imports
+from analytics.ai_analyst import AIAnalyst
+from analytics.query_engine import QueryEngine
+
 # Page Configuration
 st.set_page_config(
     page_title="InsightIQ | Data Intelligence Platform",
@@ -52,7 +56,7 @@ def main():
         insights_temp = insight_engine_temp.generate_insights()
         
         report_content = f"""========================================
-      INSIGHTIQ ANALYTICS REPORT
+     INSIGHTIQ ANALYTICS REPORT
 ========================================
 Dataset Name: {dataset_name}
 Total Rows: {current_df.shape[0]:,}
@@ -85,6 +89,8 @@ KEY INSIGHTS & FINDINGS:
         if "cleaned_df" not in st.session_state or dataset_name != st.session_state.get("current_dataset"):
             st.session_state.cleaned_df = df.copy()
             st.session_state.current_dataset = dataset_name
+            # Clear chat history when a new dataset is loaded
+            st.session_state.chat_history = []
 
         active_df = st.session_state.cleaned_df
 
@@ -108,13 +114,14 @@ KEY INSIGHTS & FINDINGS:
 
         st.markdown("---")
 
-        # --- TABS FOR ORGANIZATION ---
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        # --- TABS FOR ORGANIZATION (Updated with Phase 2A AI Analyst) ---
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
             "🔍 Dataset Preview", 
             "🧹 Data Cleaning", 
             "📈 Statistics", 
             "📉 Visualizations", 
-            "💡 Key Insights"
+            "💡 Key Insights",
+            "💬 AI Data Analyst"
         ])
 
         with tab1:
@@ -315,6 +322,59 @@ KEY INSIGHTS & FINDINGS:
                     st.success(f"• {insight}")
             else:
                 st.info("No major anomalies or rule-based triggers found for this dataset layout.")
+
+        # --- Tab 6: AI Data Analyst (Phase 2A) ---
+        with tab6:
+            st.subheader("💬 AI Data Analyst")
+            st.markdown("Ask questions about your active dataset in normal English. InsightIQ will query the data and explain the results.")
+
+            # Initialize chat history in session state if it doesn't exist
+            if "chat_history" not in st.session_state:
+                st.session_state.chat_history = []
+
+            # Initialize AI Analyst and Query Engine backend using the active DataFrame
+            ai_analyst = AIAnalyst()
+            query_engine = QueryEngine(active_df)
+            dataset_summary = query_engine.get_dataset_summary()
+
+            # Display chat history container
+            for message in st.session_state.chat_history:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+            # Chat input box for user questions
+            user_question = st.chat_input("Ask InsightIQ anything about your dataset (e.g., 'What is the average purchase amount?')")
+
+            if user_question:
+                # 1. Append user message to history and display
+                st.session_state.chat_history.append({"role": "user", "content": user_question})
+                with st.chat_message("user"):
+                    st.markdown(user_question)
+
+                # 2. Process query via AI Analyst & Query Engine
+                with st.chat_message("assistant"):
+                    with st.spinner("Analyzing your dataset..."):
+                        # Step A: Interpret question into JSON instruction
+                        instruction = ai_analyst.interpret_question(user_question, dataset_summary)
+                        
+                        # Step B: Execute query on active DataFrame
+                        raw_result = query_engine.execute_query(instruction)
+                        
+                        # Step C: Generate natural language response
+                        final_answer = ai_analyst.generate_natural_answer(user_question, raw_result, instruction)
+                        
+                        # Display result
+                        st.markdown(final_answer)
+
+                        # Optional: Show technical evaluation breakdown in an expander
+                        with st.expander("🔍 View Technical Details"):
+                            st.json({
+                                "AI Instruction": instruction,
+                                "Raw Calculation Result": raw_result
+                            })
+
+                # 3. Append assistant response to history
+                st.session_state.chat_history.append({"role": "assistant", "content": final_answer})
 
     else:
         st.info("👈 Please upload a CSV file via the sidebar or place a `sample.csv` inside your `data/` folder to get started!")

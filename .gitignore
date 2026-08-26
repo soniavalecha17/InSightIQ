@@ -26,3 +26,5 @@ outputs/
 *.png
 *.jpg
 *.pdf
+
+.env
