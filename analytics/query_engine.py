@@ -69,6 +69,17 @@ class QueryEngine:
         group_col = query_instruction.get("group_col")
         filters = query_instruction.get("filters", [])
 
+        # Match target_col and group_col case-insensitively against actual dataframe columns
+        if target_col:
+            matching_targets = [c for c in self.df.columns if c.strip().lower() == target_col.strip().lower()]
+            if matching_targets:
+                target_col = matching_targets[0]
+
+        if group_col:
+            matching_groups = [c for c in self.df.columns if c.strip().lower() == group_col.strip().lower()]
+            if matching_groups:
+                group_col = matching_groups[0]
+
         df = self._apply_filters(self.df, filters)
 
         if df.empty or len(df) == 0:

@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
+import plotly.express as px
 
 # Import your Phase 1 Analytics modules
 from analytics.loader import DatasetLoader
@@ -11,7 +12,7 @@ from analytics.cleaner import DataCleaner
 from analytics.statistics import StatisticalAnalyzer
 from analytics.insights import InsightGenerator
 
-# Phase 2A Imports
+# Phase 2A/2B Imports
 from analytics.ai_analyst import AIAnalyst
 from analytics.query_engine import QueryEngine
 
@@ -21,6 +22,48 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
+
+def render_visualization(instruction: dict, raw_result: any, df: pd.DataFrame):
+    """Renders Plotly charts based on the AI analyst's instructions and execution results."""
+    chart_type = instruction.get("chart_type", "none")
+    chart_title = instruction.get("chart_title", "Data Visualization")
+    group_col = instruction.get("group_col")
+    target_col = instruction.get("target_col")
+
+    if chart_type == "none" or not chart_type:
+        return
+
+    try:
+        # Handle dictionary results (e.g., group_sum, group_mean) for bar/pie charts
+        if isinstance(raw_result, dict) and group_col and target_col:
+            chart_df = pd.DataFrame(list(raw_result.items()), columns=[group_col, target_col])
+            
+            if chart_type == "bar":
+                fig = px.bar(chart_df, x=group_col, y=target_col, title=chart_title, text_auto=True)
+                st.plotly_chart(fig, use_container_width=True)
+            elif chart_type == "pie":
+                fig = px.pie(chart_df, names=group_col, values=target_col, title=chart_title)
+                st.plotly_chart(fig, use_container_width=True)
+            elif chart_type == "line":
+                fig = px.line(chart_df, x=group_col, y=target_col, title=chart_title, markers=True)
+                st.plotly_chart(fig, use_container_width=True)
+
+        # Handle list of records (e.g., top_n)
+        elif isinstance(raw_result, list) and len(raw_result) > 0:
+            chart_df = pd.DataFrame(raw_result)
+            if target_col and len(chart_df.columns) >= 2:
+                x_col = chart_df.columns[0] if group_col not in chart_df.columns else group_col
+                if chart_type == "bar":
+                    fig = px.bar(chart_df, x=x_col, y=target_col, title=chart_title, text_auto=True)
+                    st.plotly_chart(fig, use_container_width=True)
+                elif chart_type == "line":
+                    fig = px.line(chart_df, x=x_col, y=target_col, title=chart_title, markers=True)
+                    st.plotly_chart(fig, use_container_width=True)
+                elif chart_type == "scatter" and len(chart_df.columns) >= 2:
+                    fig = px.scatter(chart_df, x=x_col, y=target_col, title=chart_title)
+                    st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.info(f"Could not render automated visualization: {e}")
 
 def main():
     # --- SIDEBAR ---
@@ -44,7 +87,6 @@ def main():
 
     # --- EXPORT REPORT (SIDEBAR) ---
     if df is not None:
-        # Use active_df if it exists in session state, otherwise use base df
         current_df = st.session_state.get("cleaned_df", df)
         
         st.sidebar.markdown("---")
@@ -56,7 +98,7 @@ def main():
         insights_temp = insight_engine_temp.generate_insights()
         
         report_content = f"""========================================
-     INSIGHTIQ ANALYTICS REPORT
+   INSIGHTIQ ANALYTICS REPORT
 ========================================
 Dataset Name: {dataset_name}
 Total Rows: {current_df.shape[0]:,}
@@ -85,11 +127,9 @@ KEY INSIGHTS & FINDINGS:
     st.markdown("---")
 
     if df is not None:
-        # Keep a working copy in session state for cleaning modifications
         if "cleaned_df" not in st.session_state or dataset_name != st.session_state.get("current_dataset"):
             st.session_state.cleaned_df = df.copy()
             st.session_state.current_dataset = dataset_name
-            # Clear chat history when a new dataset is loaded
             st.session_state.chat_history = []
 
         active_df = st.session_state.cleaned_df
@@ -114,7 +154,7 @@ KEY INSIGHTS & FINDINGS:
 
         st.markdown("---")
 
-        # --- TABS FOR ORGANIZATION (Updated with Phase 2A AI Analyst) ---
+        # --- TABS FOR ORGANIZATION ---
         tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
             "🔍 Dataset Preview", 
             "🧹 Data Cleaning", 
@@ -135,7 +175,6 @@ KEY INSIGHTS & FINDINGS:
             st.subheader("🧹 Dataset Cleaning Suite")
             cleaner = DataCleaner(active_df)
 
-            # 1. Missing Values Section
             st.markdown("#### 1. Handle Missing Values")
             missing_quality = profile['quality_report'][profile['quality_report']['Missing Values'] > 0]
             
@@ -161,7 +200,6 @@ KEY INSIGHTS & FINDINGS:
 
             st.markdown("---")
 
-            # 2. Duplicate Removal Section
             st.markdown("#### 2. Remove Duplicate Rows")
             st.write(f"Current duplicate rows: **{profile['duplicates']}**")
             if profile['duplicates'] > 0:
@@ -174,7 +212,6 @@ KEY INSIGHTS & FINDINGS:
 
             st.markdown("---")
 
-            # 3. Data Type Conversion Section
             st.markdown("#### 3. Convert Data Types")
             conv_col = st.selectbox("Select column to convert", active_df.columns.tolist(), key="conv_col")
             current_type = str(active_df[conv_col].dtype)
@@ -192,7 +229,6 @@ KEY INSIGHTS & FINDINGS:
 
             st.markdown("---")
 
-            # 4. Show Cleaned Dataset Preview & Download
             st.markdown("#### 👁️ Show Cleaned Dataset (Preview)")
             st.dataframe(st.session_state.cleaned_df.head(10), use_container_width=True)
 
@@ -323,16 +359,14 @@ KEY INSIGHTS & FINDINGS:
             else:
                 st.info("No major anomalies or rule-based triggers found for this dataset layout.")
 
-        # --- Tab 6: AI Data Analyst (Phase 2A) ---
+        # --- Tab 6: AI Data Analyst (Phase 2A & 2B) ---
         with tab6:
             st.subheader("💬 AI Data Analyst")
-            st.markdown("Ask questions about your active dataset in normal English. InsightIQ will query the data and explain the results.")
+            st.markdown("Ask questions about your active dataset in normal English. InsightIQ will query the data, provide explanations, and render dynamic charts.")
 
-            # Initialize chat history in session state if it doesn't exist
             if "chat_history" not in st.session_state:
                 st.session_state.chat_history = []
 
-            # Initialize AI Analyst and Query Engine backend using the active DataFrame
             ai_analyst = AIAnalyst()
             query_engine = QueryEngine(active_df)
             dataset_summary = query_engine.get_dataset_summary()
@@ -341,19 +375,18 @@ KEY INSIGHTS & FINDINGS:
             for message in st.session_state.chat_history:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
+                    # If message stored visualization context, we can re-render if needed, 
+                    # but active rendering happens below during generation.
 
-            # Chat input box for user questions
-            user_question = st.chat_input("Ask InsightIQ anything about your dataset (e.g., 'What is the average purchase amount?')")
+            user_question = st.chat_input("Ask InsightIQ anything about your dataset (e.g., 'Show total sales by category')")
 
             if user_question:
-                # 1. Append user message to history and display
                 st.session_state.chat_history.append({"role": "user", "content": user_question})
                 with st.chat_message("user"):
                     st.markdown(user_question)
 
-                # 2. Process query via AI Analyst & Query Engine
                 with st.chat_message("assistant"):
-                    with st.spinner("Analyzing your dataset..."):
+                    with st.spinner("Analyzing your dataset and generating visuals..."):
                         # Step A: Interpret question into JSON instruction
                         instruction = ai_analyst.interpret_question(user_question, dataset_summary)
                         
@@ -363,17 +396,19 @@ KEY INSIGHTS & FINDINGS:
                         # Step C: Generate natural language response
                         final_answer = ai_analyst.generate_natural_answer(user_question, raw_result, instruction)
                         
-                        # Display result
+                        # Display text result
                         st.markdown(final_answer)
 
-                        # Optional: Show technical evaluation breakdown in an expander
+                        # Step D: Render Dynamic Chart if requested by AI
+                        render_visualization(instruction, raw_result, active_df)
+
+                        # Show technical evaluation breakdown in an expander
                         with st.expander("🔍 View Technical Details"):
                             st.json({
                                 "AI Instruction": instruction,
                                 "Raw Calculation Result": raw_result
                             })
 
-                # 3. Append assistant response to history
                 st.session_state.chat_history.append({"role": "assistant", "content": final_answer})
 
     else:
