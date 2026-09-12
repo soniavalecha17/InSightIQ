@@ -24,18 +24,25 @@ class AIAnalyst:
         The user asked this question in natural language: "{question}"
 
         Map this question into the required JSON structure. 
-        CRITICAL: If the user specifies a condition (e.g., "rating greater than 4", "where city is Mumbai", "price less than 500"), you MUST populate the "filters" array with an object containing:
-        - "column": the exact column name matching the condition
-        - "operator": one of ["==", "!=", ">", "<", ">=", "<=", "contains"]
-        - "value": the numeric or string threshold value.
+        CRITICAL RULES:
+        1. If the user asks for a category breakdown, distribution, or count per group (e.g., "in each city", "by product", "per category", "number of customers in each city"), you MUST set:
+           - "operation_type": "group_count" (or "group_sum", "group_mean" if summing/averaging values)
+           - "group_col": the exact categorical column name to group by (e.g., "City", "Product")
+           - "chart_type": "bar" or "pie"
+        2. If the user specifies a condition (e.g., "rating greater than 4", "where city is Mumbai", "price less than 500"), you MUST populate the "filters" array with an object containing:
+           - "column": the exact column name matching the condition
+           - "operator": one of ["==", "!=", ">", "<", ">=", "<=", "contains"]
+           - "value": the numeric or string threshold value.
 
         Also recommend an appropriate visualization chart type ("bar", "line", "pie", "scatter", or "none") and a concise chart title if the query lends itself to visual representation.
 
-        Example for "How many products have a rating greater than 4?":
-        - operation_type: "count"
-        - target_col: "Product" (or null)
-        - filters: [{{"column": "Rating", "operator": ">", "value": "4"}}]
-        - chart_type: "none"
+        Example for "Show the number of customers in each city.":
+        - operation_type: "group_count"
+        - target_col: null
+        - group_col: "City"
+        - filters: []
+        - chart_type: "bar"
+        - chart_title: "Number of Customers by City"
         """
 
         response_schema = {
@@ -45,7 +52,7 @@ class AIAnalyst:
                     "type": "STRING",
                     "enum": [
                         "mean", "sum", "max", "min", "median", "count", "unique_count",
-                        "highest_group", "lowest_group", "top_n", "group_mean", "group_sum", "unknown"
+                        "highest_group", "lowest_group", "top_n", "group_mean", "group_sum", "group_count", "unknown"
                     ]
                 },
                 "target_col": {
@@ -54,7 +61,7 @@ class AIAnalyst:
                 },
                 "group_col": {
                     "type": "STRING",
-                    "description": "Exact column name to group by"
+                    "description": "Exact column name to group by (e.g., City, Category)"
                 },
                 "filters": {
                     "type": "ARRAY",
@@ -96,9 +103,9 @@ class AIAnalyst:
                     temperature=0.1
                 )
             )
-            
+
             return json.loads(response.text.strip())
-        
+
         except Exception as e:
             return {
                 "operation_type": "unknown",

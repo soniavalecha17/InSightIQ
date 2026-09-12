@@ -127,6 +127,10 @@ class QueryEngine:
                 grouped = df.groupby(group_col)[target_col].sum().to_dict()
                 return {str(k): float(v) for k, v in grouped.items()}
 
+            elif op_type == "group_count" and group_col in df.columns:
+                grouped = df.groupby(group_col).size().to_dict()
+                return {str(k): int(v) for k, v in grouped.items()}
+
             elif op_type == "top_n" and target_col in df.columns:
                 n = 5
                 top_records = df.nlargest(n, target_col)
