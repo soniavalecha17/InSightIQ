@@ -23,14 +23,139 @@ st.set_page_config(
     layout="wide"
 )
 
-def find_best_column(df, keywords):
-    """Helper function to dynamically find a relevant column using case-insensitive keywords."""
-    cols = df.columns.tolist()
-    for kw in keywords:
-        for col in cols:
-            if kw.lower() in col.lower():
+def find_column_by_keywords(df, keywords):
+    """Semantic column detector using case-insensitive keywords and substring matching."""
+    for col in df.columns:
+        col_name = col.lower().replace("_", " ").strip()
+        for keyword in keywords:
+            if keyword in col_name:
                 return col
     return None
+
+def find_best_categorical(df):
+    """Selects a useful categorical column avoiding IDs or unique keys (like Name or ID)."""
+    categorical_cols = df.select_dtypes(include=["object", "category", "bool"]).columns
+    candidates = []
+    
+    for col in categorical_cols:
+        unique = df[col].nunique(dropna=True)
+        # Avoid columns where almost every row is unique (e.g. IDs, names)
+        if 2 <= unique <= min(30, len(df) * 0.3):
+            candidates.append(col)
+            
+    if candidates:
+        return candidates[0]
+    return categorical_cols[0] if len(categorical_cols) > 0 else None
+
+def get_dynamic_kpis(df):
+    """
+    Automatically detects meaningful semantic and statistical KPIs based on the uploaded dataset.
+    """
+    kpis = []
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    categorical_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+
+    # KPI 1: Total Records / Items / Customers / Properties
+    row_count = len(df)
+    rec_label = "📋 TOTAL RECORDS"
+    if find_column_by_keywords(df, ["customer", "client", "user"]):
+        rec_label = "👥 TOTAL CUSTOMERS"
+    elif find_column_by_keywords(df, ["student", "pupil"]):
+        rec_label = "🎓 TOTAL STUDENTS"
+    elif find_column_by_keywords(df, ["employee", "staff"]):
+        rec_label = "👔 TOTAL EMPLOYEES"
+    elif find_column_by_keywords(df, ["property", "house", "building"]):
+        rec_label = "🏠 TOTAL PROPERTIES"
+    elif find_column_by_keywords(df, ["product", "item", "sku"]):
+        rec_label = "📦 TOTAL PRODUCTS"
+
+    kpis.append({
+        "label": rec_label,
+        "value": f"{row_count:,}"
+    })
+
+    # KPI 2: Semantic Numeric Match (Age, Salary, Price, Sales, Balance, Score)
+    age_col = find_column_by_keywords(df, ["age", "customer_age", "user_age"])
+    salary_col = find_column_by_keywords(df, ["salary", "income", "revenue", "sales", "balance", "amount", "price", "cost", "score", "rating"])
+    
+    selected_num = age_col if age_col else salary_col
+    if not selected_num and numeric_cols:
+        selected_num = numeric_cols[0]
+
+    if selected_num and pd.api.types.is_numeric_dtype(df[selected_num]):
+        mean_val = df[selected_num].mean()
+        col_lower = selected_num.lower()
+        if "age" in col_lower:
+            label = "📊 AVERAGE AGE"
+            val_str = f"{mean_val:,.1f}"
+        elif any(k in col_lower for k in ["salary", "income", "revenue", "sales", "balance", "amount", "price", "cost"]):
+            label = f"💰 AVG {selected_num.replace('_', ' ').upper()}"
+            val_str = f"{mean_val:,.2f}"
+        elif any(k in col_lower for k in ["score", "rating"]):
+            label = f"⭐ AVG {selected_num.replace('_', ' ').upper()}"
+            val_str = f"{mean_val:,.2f}"
+        else:
+            label = f"📊 AVG {selected_num.replace('_', ' ').upper()}"
+            val_str = f"{mean_val:,.2f}"
+
+        kpis.append({"label": label, "value": val_str})
+
+    # KPI 3: Second Numeric / Median or Rate
+    second_num = None
+    for col in numeric_cols:
+        if col != selected_num:
+            second_num = col
+            break
+
+    if second_num and pd.api.types.is_numeric_dtype(df[second_num]):
+        med_val = df[second_num].median()
+        kpis.append({
+            "label": f"📈 MEDIAN {second_num.replace('_', ' ').upper()}",
+            "value": f"{med_val:,.2f}"
+        })
+
+    # KPI 4: Binary/Outcome or Unique Category Rate
+    binary_col = None
+    for col in categorical_cols:
+        if df[col].dropna().nunique() == 2:
+            binary_col = col
+            break
+
+    if binary_col:
+        vc = df[binary_col].dropna().value_counts()
+        pct = (vc.iloc[0] / vc.sum()) * 100
+        kpis.append({
+            "label": f"📌 {binary_col.replace('_', ' ').upper()} RATE",
+            "value": f"{pct:.1f}%"
+        })
+    else:
+        best_cat = find_best_categorical(df)
+        if best_cat:
+            unique_cnt = df[best_cat].nunique()
+            kpis.append({
+                "label": f"🔹 UNIQUE {best_cat.replace('_', ' ').upper()}",
+                "value": f"{unique_cnt:,}"
+            })
+
+    return kpis[:4]
+
+def get_dynamic_suggestions(df):
+    """Generates context-aware sample questions for the AI Analyst based on dataset schema."""
+    suggestions = ["Total records?", "Summary statistics?"]
+    
+    if find_column_by_keywords(df, ["age"]):
+        suggestions.append("Average age?")
+    if find_column_by_keywords(df, ["balance", "salary", "income", "price", "amount", "revenue"]):
+        suggestions.append("Average balance or salary?")
+    if find_column_by_keywords(df, ["default", "subscribed", "target", "churn", "status", "outcome"]):
+        suggestions.append("What is the success or subscription rate?")
+    if find_column_by_keywords(df, ["job", "department", "category", "education"]):
+        suggestions.append("Breakdown by category?")
+        
+    while len(suggestions) < 6:
+        suggestions.append("Tell me about this dataset.")
+        
+    return suggestions[:6]
 
 def render_visualization(instruction: dict, raw_result: any, df: pd.DataFrame):
     """Renders Plotly charts based on the AI analyst's instructions and execution results."""
@@ -167,116 +292,117 @@ KEY INSIGHTS & FINDINGS:
         col3.metric("MISSING", f"{missing_pct:.1f}%")
         col4.metric("DUPLICATES", f"{profile['duplicates']}")
 
-        # --- PHASE 3.2: DYNAMIC COLUMN & SALES DETECTION ---
-        price_col = find_best_column(active_df, ["unit_price", "price", "cost"])
-        qty_col = find_best_column(active_df, ["sales_volume", "quantity", "qty", "volume", "units"])
-        single_sales_col = find_best_column(active_df, ["purchase_amount", "sales", "amount", "revenue", "total", "value"])
+        # --- SEMANTIC COLUMN DETECTION FOR VISUALIZATIONS ---
+        numeric_cols = active_df.select_dtypes(include="number").columns.tolist()
+        best_cat_col = find_best_categorical(active_df)
+        
+        # Second category or alternative numeric column for visualizations
+        categorical_cols = active_df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+        secondary_cat_col = categorical_cols[1] if len(categorical_cols) > 1 else best_cat_col
+        primary_num_col = numeric_cols[0] if numeric_cols else None
+        secondary_num_col = numeric_cols[1] if len(numeric_cols) > 1 else primary_num_col
 
-        sales_col = None
-        if price_col and qty_col and pd.api.types.is_numeric_dtype(active_df[price_col]) and pd.api.types.is_numeric_dtype(active_df[qty_col]):
-            active_df["_calculated_sales"] = active_df[price_col] * active_df[qty_col]
-            sales_col = "_calculated_sales"
-        else:
-            sales_col = single_sales_col
-
-        cust_col = find_best_column(active_df, ["customer_id", "customerid", "customer", "user_id", "userid", "client"])
-        prod_col = find_best_column(active_df, ["product_name", "product", "item", "good", "article", "sku"])
-        city_col = find_best_column(active_df, ["city", "location", "region", "store", "branch", "country", "state", "zone"])
-        rating_col = find_best_column(active_df, ["rating", "score", "stars", "review"])
-        stock_col = find_best_column(active_df, ["stock", "inventory", "quantity_in_stock", "qty"])
-
-        total_sales = active_df[sales_col].sum() if sales_col and pd.api.types.is_numeric_dtype(active_df[sales_col]) else None
-        total_customers = active_df[cust_col].nunique() if cust_col else active_df.shape[0]
-        average_purchase = active_df[sales_col].mean() if sales_col and pd.api.types.is_numeric_dtype(active_df[sales_col]) else None
-        unique_products = active_df[prod_col].nunique() if prod_col else active_df.select_dtypes(include=['number']).shape[1]
-
-        # --- PHASE 3.2: DASHBOARD OVERVIEW SECTION ---
+        # --- PHASE 3.3: FULLY DYNAMIC KPI DASHBOARD ---
         st.markdown("---")
         st.markdown("### 📊 DASHBOARD OVERVIEW")
 
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        kpi1.metric("💰 TOTAL SALES", f"₹{total_sales:,.0f}" if total_sales is not None else "Not available")
-        kpi2.metric("👥 CUSTOMERS", f"{total_customers:,}")
-        kpi3.metric("🛒 AVG PURCHASE", f"₹{average_purchase:,.1f}" if average_purchase is not None else "Not available")
-        kpi4.metric("📦 PRODUCTS", f"{unique_products}")
+        dynamic_kpis = get_dynamic_kpis(active_df)
+        kpi_columns = st.columns(4)
 
+        for i, kpi in enumerate(dynamic_kpis):
+            with kpi_columns[i]:
+                st.metric(
+                    kpi["label"],
+                    kpi["value"]
+                )
+
+        # --- FULLY DYNAMIC VISUALIZATIONS SECTION ---
         st.markdown("---")
         st.markdown("#### 📈 Key Business Visualizations")
 
         chart_col1, chart_col2 = st.columns(2)
 
         with chart_col1:
-            if city_col and sales_col and pd.api.types.is_numeric_dtype(active_df[sales_col]):
-                city_sales = active_df.groupby(city_col)[sales_col].sum().reset_index()
-                fig_city = px.bar(city_sales, x=city_col, y=sales_col, title=f"💰 Total Sales by {city_col.title()}", text_auto=True)
-                st.plotly_chart(fig_city, use_container_width=True)
-            elif city_col:
-                city_counts = active_df[city_col].value_counts().reset_index()
-                city_counts.columns = [city_col, "Count"]
-                fig_city = px.bar(city_counts, x=city_col, y="Count", title=f"Records by {city_col.title()}", text_auto=True)
-                st.plotly_chart(fig_city, use_container_width=True)
+            if best_cat_col:
+                cat_counts = active_df[best_cat_col].value_counts().head(10).reset_index()
+                cat_counts.columns = [best_cat_col, "Count"]
+                fig_cat = px.bar(cat_counts, x=best_cat_col, y="Count", title=f"📊 Distribution of {best_cat_col.replace('_', ' ').title()}", text_auto=True)
+                st.plotly_chart(fig_cat, use_container_width=True)
             else:
-                st.info("Location/City dimension column not available for regional visualization.")
+                st.info("Categorical dimension column not available for distribution visualization.")
 
-            if city_col and sales_col and pd.api.types.is_numeric_dtype(active_df[sales_col]):
-                city_avg = active_df.groupby(city_col)[sales_col].mean().reset_index()
-                fig_avg = px.bar(city_avg, x=city_col, y=sales_col, title=f"🛒 Average Purchase by {city_col.title()}", text_auto=True)
-                st.plotly_chart(fig_avg, use_container_width=True)
+            if primary_num_col and pd.api.types.is_numeric_dtype(active_df[primary_num_col]):
+                fig_num = px.histogram(active_df, x=primary_num_col, title=f"📈 Distribution of {primary_num_col.replace('_', ' ').title()}", nbins=30)
+                st.plotly_chart(fig_num, use_container_width=True)
 
         with chart_col2:
-            if city_col and cust_col:
-                city_cust = active_df.groupby(city_col)[cust_col].nunique().reset_index()
-                fig_cust = px.bar(city_cust, x=city_col, y=cust_col, title=f"👥 Customers by {city_col.title()}", text_auto=True)
-                st.plotly_chart(fig_cust, use_container_width=True)
-            elif city_col:
-                st.info("Customer identifier column not found for customer distribution.")
-
-            if rating_col and pd.api.types.is_numeric_dtype(active_df[rating_col]):
-                rating_counts = active_df[rating_col].value_counts().sort_index(ascending=False).reset_index()
-                rating_counts.columns = [rating_col, "Count"]
-                fig_rating = px.bar(rating_counts, x=rating_col, y="Count", title="⭐ Rating Distribution", text_auto=True)
-                st.plotly_chart(fig_rating, use_container_width=True)
+            if secondary_cat_col and secondary_cat_col != best_cat_col:
+                sec_counts = active_df[secondary_cat_col].value_counts().head(10).reset_index()
+                sec_counts.columns = [secondary_cat_col, "Count"]
+                fig_sec = px.bar(sec_counts, x=secondary_cat_col, y="Count", title=f"📌 Distribution of {secondary_cat_col.replace('_', ' ').title()}", text_auto=True)
+                st.plotly_chart(fig_sec, use_container_width=True)
+            elif best_cat_col and secondary_num_col and pd.api.types.is_numeric_dtype(active_df[secondary_num_col]):
+                agg_df = active_df.groupby(best_cat_col)[secondary_num_col].mean().reset_index().head(10)
+                fig_agg = px.bar(agg_df, x=best_cat_col, y=secondary_num_col, title=f"📉 Avg {secondary_num_col.replace('_', ' ').title()} by {best_cat_col.replace('_', ' ').title()}", text_auto=True)
+                st.plotly_chart(fig_agg, use_container_width=True)
             else:
-                st.info("Rating column not available for rating distribution chart.")
+                st.info("Secondary categorical or numerical dimension not available for secondary breakdown.")
 
-        if prod_col and sales_col and pd.api.types.is_numeric_dtype(active_df[sales_col]):
-            prod_sales = active_df.groupby(prod_col)[sales_col].sum().reset_index()
-            fig_prod = px.bar(prod_sales, x=prod_col, y=sales_col, title="📦 Sales by Product", text_auto=True)
-            st.plotly_chart(fig_prod, use_container_width=True)
+            if secondary_num_col and pd.api.types.is_numeric_dtype(active_df[secondary_num_col]) and secondary_num_col != primary_num_col:
+                fig_num2 = px.histogram(active_df, x=secondary_num_col, title=f"📊 Distribution of {secondary_num_col.replace('_', ' ').title()}", nbins=30)
+                st.plotly_chart(fig_num2, use_container_width=True)
 
-        # --- TOP PERFORMERS ---
+        # --- DYNAMIC KEY METRICS / DATA HIGHLIGHTS ---
         st.markdown("---")
-        st.markdown("### 🏆 TOP PERFORMERS")
-        tp1, tp2, tp3, tp4 = st.columns(4)
+        st.markdown("### 🏆 KEY METRICS & DATA HIGHLIGHTS")
+        hp1, hp2, hp3, hp4 = st.columns(4)
 
-        top_city = active_df.groupby(city_col)[sales_col].sum().idxmax() if city_col and sales_col and pd.api.types.is_numeric_dtype(active_df[sales_col]) and not active_df.empty else "N/A"
-        top_product = active_df.groupby(prod_col)[sales_col].sum().idxmax() if prod_col and sales_col and pd.api.types.is_numeric_dtype(active_df[sales_col]) and not active_df.empty else "N/A"
-        highest_purchase = active_df[sales_col].max() if sales_col and pd.api.types.is_numeric_dtype(active_df[sales_col]) and not active_df.empty else None
-        best_rated_prod = active_df.groupby(prod_col)[rating_col].mean().idxmax() if prod_col and rating_col and pd.api.types.is_numeric_dtype(active_df[rating_col]) and not active_df.empty else "N/A"
+        highlight_1_label = "Top Category"
+        highlight_1_val = "N/A"
+        if best_cat_col and not active_df.empty:
+            top_cat_mode = active_df[best_cat_col].mode()
+            if not top_cat_mode.empty:
+                highlight_1_label = f"Most Common {best_cat_col.replace('_', ' ').title()}"
+                highlight_1_val = str(top_cat_mode.iloc[0])
 
-        tp1.metric("Top Location", str(top_city))
-        tp2.metric("Top Product", str(top_product))
-        tp3.metric("Highest Purchase", f"₹{highest_purchase:,.0f}" if highest_purchase is not None else "Not available")
-        tp4.metric("Best Rated Product", str(best_rated_prod))
+        highlight_2_label = "Secondary Category"
+        highlight_2_val = "N/A"
+        if secondary_cat_col and secondary_cat_col != best_cat_col and not active_df.empty:
+            sec_mode = active_df[secondary_cat_col].mode()
+            if not sec_mode.empty:
+                highlight_2_label = f"Most Common {secondary_cat_col.replace('_', ' ').title()}"
+                highlight_2_val = str(sec_mode.iloc[0])
+
+        highlight_3_label = "Max Numeric Value"
+        highlight_3_val = "N/A"
+        if primary_num_col and pd.api.types.is_numeric_dtype(active_df[primary_num_col]) and not active_df.empty:
+            max_val = active_df[primary_num_col].max()
+            highlight_3_label = f"Max {primary_num_col.replace('_', ' ').title()}"
+            highlight_3_val = f"{max_val:,.1f}" if isinstance(max_val, (int, float)) else str(max_val)
+
+        highlight_4_label = "Total Records"
+        highlight_4_val = f"{len(active_df):,}"
+        if secondary_num_col and pd.api.types.is_numeric_dtype(active_df[secondary_num_col]) and not active_df.empty:
+            mean_val = active_df[secondary_num_col].mean()
+            highlight_4_label = f"Avg {secondary_num_col.replace('_', ' ').title()}"
+            highlight_4_val = f"{mean_val:,.1f}"
+
+        hp1.metric(highlight_1_label, highlight_1_val)
+        hp2.metric(highlight_2_label, highlight_2_val)
+        hp3.metric(highlight_3_label, highlight_3_val)
+        hp4.metric(highlight_4_label, highlight_4_val)
 
         # --- BUSINESS ALERTS ---
         st.markdown("---")
         st.markdown("### ⚠️ BUSINESS ALERTS & INSIGHTS")
 
-        if stock_col and pd.api.types.is_numeric_dtype(active_df[stock_col]):
-            low_stock_count = active_df[active_df[stock_col] < 5].shape[0]
-            if low_stock_count > 0:
-                st.warning(f"⚠️ **INVENTORY ALERT:** {low_stock_count} products are below reorder level (stock < 5).")
-            else:
-                st.success("✅ **Inventory Status:** All products have healthy stock levels.")
+        if primary_num_col and pd.api.types.is_numeric_dtype(active_df[primary_num_col]):
+            mean_p1 = active_df[primary_num_col].mean()
+            st.info(f"💡 **DATA INSIGHT:** The dataset contains **{len(active_df):,}** total records with an average {primary_num_col.replace('_', ' ')} of **{mean_p1:,.2f}**.")
 
-        if city_col and sales_col and pd.api.types.is_numeric_dtype(active_df[sales_col]):
-            top_city_val = active_df.groupby(city_col)[sales_col].sum().max()
-            st.info(f"💡 **KEY INSIGHT:** **{top_city}** generates the highest total purchase amount (₹{top_city_val:,.0f}).")
-
-        if rating_col and pd.api.types.is_numeric_dtype(active_df[rating_col]):
-            high_ratings = active_df[active_df[rating_col] > 4].shape[0]
-            st.info(f"⭐ **CUSTOMER INSIGHT:** {high_ratings} transactions received ratings greater than 4.")
+        if best_cat_col and not active_df.empty:
+            unique_cats = active_df[best_cat_col].nunique()
+            st.info(f"📌 **CATEGORY INSIGHT:** `{best_cat_col}` contains **{unique_cats}** distinct unique values.")
 
         st.markdown("---")
 
@@ -507,33 +633,17 @@ KEY INSIGHTS & FINDINGS:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
 
-            # Suggested Questions UI placed ABOVE the input box
+            # Dynamically generated suggested questions based on schema
             st.markdown("##### 💡 Suggested Questions")
-            s_col1, s_col2, s_col3 = st.columns(3)
+            dynamic_suggestions = get_dynamic_suggestions(active_df)
+            s_cols = st.columns(3)
 
-            with s_col1:
-                if st.button("Total sales volume?", use_container_width=True):
-                    st.session_state.pending_suggestion = "What is the total sales volume?"
-                    st.rerun()
-                if st.button("Products with low stock?", use_container_width=True):
-                    st.session_state.pending_suggestion = "What products have low stock?"
-                    st.rerun()
-
-            with s_col2:
-                if st.button("Average value by category?", use_container_width=True):
-                    st.session_state.pending_suggestion = "What is the average value by category?"
-                    st.rerun()
-                if st.button("Products expiring soon?", use_container_width=True):
-                    st.session_state.pending_suggestion = "Which products are expiring soon?"
-                    st.rerun()
-
-            with s_col3:
-                if st.button("Category with highest sales?", use_container_width=True):
-                    st.session_state.pending_suggestion = "Which category has the highest sales?"
-                    st.rerun()
-                if st.button("City with highest sales?", use_container_width=True):
-                    st.session_state.pending_suggestion = "Which city has the highest sales?"
-                    st.rerun()
+            for idx, suggestion in enumerate(dynamic_suggestions):
+                col_target = s_cols[idx % 3]
+                with col_target:
+                    if st.button(suggestion, use_container_width=True, key=f"sug_{idx}"):
+                        st.session_state.pending_suggestion = suggestion
+                        st.rerun()
 
             st.markdown("---")
 
@@ -541,7 +651,7 @@ KEY INSIGHTS & FINDINGS:
             default_input = st.session_state.pending_suggestion
             st.session_state.pending_suggestion = "" # Reset immediately
 
-            user_question = st.chat_input("Ask InsightIQ anything about your dataset (e.g., 'Show total sales by city')", key="chat_input_val")
+            user_question = st.chat_input("Ask InsightIQ anything about your dataset...", key="chat_input_val")
 
             # Final query determination
             final_query = user_question if user_question else (default_input if default_input else None)
@@ -586,7 +696,7 @@ KEY INSIGHTS & FINDINGS:
                         with st.expander("🔍 View Technical Details"):
                             st.json({
                                 "AI Instruction": instruction,
-                                "Raw Calculation Result": raw_result
+                                "Raw Calculation": raw_result
                             })
 
                 st.session_state.chat_history.append({"role": "assistant", "content": final_answer})
