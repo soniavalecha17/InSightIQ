@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
@@ -23,6 +24,8 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import accuracy_score, classification_report, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 
+logger = logging.getLogger(__name__)
+
 # Page Configuration
 st.set_page_config(
     page_title="InsightIQ | Data Intelligence Platform",
@@ -35,9 +38,7 @@ st.set_page_config(
 # ==========================================
 def classify_column_role(col, df):
     """
-    Classifies a column into its explicit semantic role to make InsightIQ dataset-agnostic.
-    Roles: Identifier, Numeric measurement, Binary categorical, Nominal categorical, 
-           Ordinal coded variable, Date/year, Target variable, Text.
+    Classifies a column into its explicit semantic role to make InsightIQ dataset-agnostic[cite: 4].
     """
     col_lower = col.lower().replace("_", " ").replace("-", " ").strip()
     series = df[col]
@@ -45,22 +46,18 @@ def classify_column_role(col, df):
     n_unique = series.nunique(dropna=True)
     unique_ratio = n_unique / n_total if n_total > 0 else 0
 
-    # 1. Identifier Check
     id_keywords = ["id", "identifier", "uuid", "key", "customer no", "user no", "serial no", "passid", "passengerid", "show_id", "invoice id", "transaction id"]
     if any(kw in col_lower for kw in id_keywords) or unique_ratio >= 0.95:
         return "Identifier"
 
-    # 2. Date / Year Check
     date_keywords = ["date", "year", "time", "timestamp", "dt", "created", "posted", "dob"]
     if any(kw in col_lower for kw in date_keywords) or pd.api.types.is_datetime64_any_dtype(series):
         return "Date/year"
 
-    # 3. Target Variable Check
     target_keywords = ["survived", "churn", "default", "target", "label", "class", "status", "fraud", "success"]
     if any(kw in col_lower for kw in target_keywords):
         return "Target variable"
 
-    # 4. Binary Categorical Check
     if pd.api.types.is_numeric_dtype(series):
         non_null = series.dropna()
         unique_vals = non_null.unique()
@@ -69,7 +66,6 @@ def classify_column_role(col, df):
     elif n_unique == 2:
         return "Binary categorical"
 
-    # 5. Text Check (long strings / high cardinality text)
     if series.dtype == "object":
         sample_vals = series.dropna().astype(str)
         if len(sample_vals) > 0:
@@ -77,16 +73,13 @@ def classify_column_role(col, df):
             if avg_len > 40 or (unique_ratio > 0.8 and not pd.api.types.is_numeric_dtype(series)):
                 return "Text"
 
-    # 6. Numeric Measurement Check
     if pd.api.types.is_numeric_dtype(series):
         return "Numeric measurement"
 
-    # 7. Ordinal Coded Variable Check (e.g., ratings 1-5, pclass 1-3)
     ordinal_keywords = ["pclass", "rating", "grade", "rank", "level", "priority", "score", "star"]
     if any(kw in col_lower for kw in ordinal_keywords) or (pd.api.types.is_numeric_dtype(series) and n_unique <= 10):
         return "Ordinal coded variable"
 
-    # 8. Default fallback: Nominal Categorical
     return "Nominal categorical"
 
 def get_column_roles_summary(df):
@@ -106,13 +99,11 @@ def find_best_categorical(df):
 # ==========================================
 def get_dynamic_kpis(df):
     """
-    Generates only strictly meaningful KPIs based on column semantics. 
-    Never pads or creates fake/generic KPIs if they do not naturally exist[cite: 5].
+    Generates only strictly meaningful KPIs based on column semantics without forcing generic fallbacks[cite: 5].
     """
     kpis = []
     roles = get_column_roles_summary(df)
     
-    # 1. Primary Entity / Record Count KPI (Always meaningful)
     row_count = len(df)
     rec_label = "📋 TOTAL RECORDS"
     if any("customer" in c.lower() for c in df.columns):
@@ -128,7 +119,6 @@ def get_dynamic_kpis(df):
 
     kpis.append({"label": rec_label, "value": f"{row_count:,}"})
 
-    # 2. Primary Financial / Measurement KPI (Revenue, Sales, Total, Price, Income, Age)
     financial_col = None
     for col, role in roles.items():
         if role == "Numeric measurement":
@@ -150,9 +140,8 @@ def get_dynamic_kpis(df):
             kpis.append({"label": "📊 AVERAGE AGE", "value": f"{avg_val:,.1f}"})
         else:
             avg_val = df[financial_col].mean()
-            kpis.append({"label": f"📊 AVG {financial_col.replace('_', ' ').upper()}", "value": f"{avg_val:,.2f}"})
+            kpis.append({"label": f"📊 AVG {financial_col.replace('_', ' ').upper()}", "value": f"${avg_val:,.2f}"})
 
-    # 3. Secondary Metric (Rating, Quantity, Target Rate, or Median Numeric)
     for col, role in roles.items():
         col_l = col.lower()
         if role in ["Target variable", "Binary categorical"]:
@@ -178,7 +167,6 @@ def get_dynamic_kpis(df):
             kpis.append({"label": f"📦 TOTAL {col.replace('_', ' ').upper()}", "value": f"{total_qty:,}"})
             break
 
-    # 4. Nominal Categorical / Demographic Share KPI
     gender_col = next((c for c in df.columns if "sex" in c.lower() or "gender" in c.lower()), None)
     if gender_col:
         vc_g = df[gender_col].dropna().astype(str).str.lower().value_counts()
@@ -193,7 +181,6 @@ def get_dynamic_kpis(df):
             unique_cnt = df[n_col].nunique()
             kpis.append({"label": f"🔹 UNIQUE {n_col.replace('_', ' ').upper()}", "value": f"{unique_cnt:,}"})
 
-    # Return exactly whatever meaningful KPIs were found (no forcing/padding with fake metrics)[cite: 5]
     return kpis
 
 def get_dynamic_suggestions(df):
@@ -334,7 +321,7 @@ KEY INSIGHTS & FINDINGS:
             roles_map = get_column_roles_summary(active_df)
             roles_df = pd.DataFrame(list(roles_map.items()), columns=["Column Name", "Detected Semantic Role"])
             st.dataframe(roles_df, use_container_width=True)
-            st.info("InsightIQ automatically inspects every column to assign roles (Identifier, Numeric measurement, Binary categorical, Date/year, Target variable, etc.) ensuring robust dataset-agnostic intelligence.")
+            st.info("InsightIQ automatically inspects every column to assign roles (Identifier, Numeric measurement, Binary categorical, Date/year, Target variable, etc.) ensuring robust dataset-agnostic intelligence[cite: 4].")
 
         with tab3:
             st.subheader("🧹 Dataset Cleaning Suite")
@@ -390,6 +377,9 @@ KEY INSIGHTS & FINDINGS:
 
         with tab7:
             st.markdown("### 🤖 AI DATA ANALYST")
+            st.markdown("Ask questions about your dataset in natural language.")
+            st.markdown("")
+
             if "chat_history" not in st.session_state:
                 st.session_state.chat_history = []
 
@@ -400,20 +390,53 @@ KEY INSIGHTS & FINDINGS:
             for message in st.session_state.chat_history:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
+                    if message.get("raw_result") and not isinstance(message["raw_result"], str):
+                        with st.expander("View verified calculation"):
+                            st.json(message["raw_result"], expanded=True)
 
-            user_question = st.chat_input("Ask InsightIQ anything about your dataset...")
+            user_question = st.chat_input("Ask InsightIQ anything about your dataset...", key="chat_input_val")
+
             if user_question:
                 st.session_state.chat_history.append({"role": "user", "content": user_question})
                 with st.chat_message("user"):
                     st.markdown(user_question)
 
                 with st.chat_message("assistant"):
-                    instruction = ai_analyst.interpret_question(user_question, dataset_summary)
-                    raw_result = query_engine.execute_query(instruction)
-                    final_answer = ai_analyst.generate_natural_answer(user_question, raw_result, instruction)
-                    st.markdown(final_answer)
+                    with st.spinner("Analyzing your dataset..."):
+                        try:
+                            instruction = ai_analyst.interpret_question(user_question, dataset_summary)
 
-                st.session_state.chat_history.append({"role": "assistant", "content": final_answer})
+                            if "error" in instruction:
+                                final_answer = f"⚠️ **Validation Error:** {instruction['error']}"
+                                st.error(final_answer)
+                                raw_result = None
+                            else:
+                                raw_result = query_engine.execute_query(instruction)
+                                final_answer = ai_analyst.generate_natural_answer(
+                                    user_question, raw_result, dataset_summary
+                                )
+                                st.markdown(final_answer)
+
+                                if raw_result is not None and not isinstance(raw_result, str):
+                                    with st.expander("View verified calculation"):
+                                        st.json(raw_result, expanded=True)
+
+                        except Exception:
+                            logger.exception("AI Analyst request failed")
+                            final_answer = (
+                                "I couldn't complete that analysis. Please check the "
+                                "application logs and try again."
+                            )
+                            st.error(final_answer)
+                            raw_result = None
+                            instruction = None
+
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": final_answer,
+                    "instruction": instruction if "instruction" in locals() else None,
+                    "raw_result": raw_result if "raw_result" in locals() else None,
+                })
                 st.rerun()
 
         with tab8:
