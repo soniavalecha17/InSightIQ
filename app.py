@@ -390,9 +390,11 @@ KEY INSIGHTS & FINDINGS:
             for message in st.session_state.chat_history:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
-                    if message.get("raw_result") and not isinstance(message["raw_result"], str):
+                    if message.get("raw_result") is not None and not isinstance(message["raw_result"], str):
                         with st.expander("View verified calculation"):
                             st.json(message["raw_result"], expanded=True)
+                    if message.get("chart_data") is not None:
+                        st.pyplot(message["chart_data"])
 
             user_question = st.chat_input("Ask InsightIQ anything about your dataset...", key="chat_input_val")
 
@@ -410,6 +412,7 @@ KEY INSIGHTS & FINDINGS:
                                 final_answer = f"⚠️ **Validation Error:** {instruction['error']}"
                                 st.error(final_answer)
                                 raw_result = None
+                                chart_fig = None
                             else:
                                 raw_result = query_engine.execute_query(instruction)
                                 final_answer = ai_analyst.generate_natural_answer(
@@ -421,6 +424,36 @@ KEY INSIGHTS & FINDINGS:
                                     with st.expander("View verified calculation"):
                                         st.json(raw_result, expanded=True)
 
+                                # Chart Rendering Pipeline Fix
+                                chart_fig = None
+                                if instruction.get("chart_type") in ["bar", "line"] and isinstance(raw_result, (dict, list)):
+                                    try:
+                                        fig, ax = plt.subplots(figsize=(6, 4))
+                                        
+                                        if isinstance(raw_result, dict):
+                                            categories = list(raw_result.keys())
+                                            values = list(raw_result.values())
+                                        elif isinstance(raw_result, list) and len(raw_result) > 0 and isinstance(raw_result[0], dict):
+                                            keys = list(raw_result[0].keys())
+                                            categories = [str(item.get(keys[0], '')) for item in raw_result]
+                                            values = [item.get(keys[1], 0) for item in raw_result]
+                                        else:
+                                            categories, values = [], []
+
+                                        if categories and values:
+                                            if instruction.get("chart_type") == "bar":
+                                                ax.bar(categories, values, color="#4c72b0")
+                                            else:
+                                                ax.plot(categories, values, marker="o", color="#4c72b0")
+                                                
+                                            ax.set_title(instruction.get("chart_title", "Data Visualization"))
+                                            plt.xticks(rotation=45, ha="right")
+                                            st.pyplot(fig)
+                                            chart_fig = fig
+                                            plt.close(fig)
+                                    except Exception as e:
+                                        logger.error(f"Failed to render chart: {e}")
+
                         except Exception:
                             logger.exception("AI Analyst request failed")
                             final_answer = (
@@ -430,12 +463,14 @@ KEY INSIGHTS & FINDINGS:
                             st.error(final_answer)
                             raw_result = None
                             instruction = None
+                            chart_fig = None
 
                 st.session_state.chat_history.append({
                     "role": "assistant",
                     "content": final_answer,
                     "instruction": instruction if "instruction" in locals() else None,
                     "raw_result": raw_result if "raw_result" in locals() else None,
+                    "chart_data": chart_fig if "chart_fig" in locals() else None,
                 })
                 st.rerun()
 

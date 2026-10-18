@@ -29,15 +29,16 @@ class QueryEngine:
             df[column], errors="coerce"
         ).dropna()
 
-    def get_dataset_summary(self):
+    def get_dataset_summary(self) -> dict:
+        categories_sample = {}
+        for col in self.df.select_dtypes(include=['object', 'category']).columns:
+            categories_sample[col] = self.df[col].dropna().unique().tolist()[:15]
+        
         return {
-            "columns": list(self.df.columns),
-            "dtypes": {
-                col: str(dtype)
-                for col, dtype in self.df.dtypes.items()
-            },
-            "shape": self.df.shape,
+            "dtypes": {col: str(dtype) for col, dtype in self.df.dtypes.items()},
             "rows": len(self.df),
+            "columns": list(self.df.columns),
+            "categorical_sample": categories_sample
         }
 
     def _apply_filters(self, df, filters):
