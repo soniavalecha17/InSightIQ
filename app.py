@@ -1,10 +1,12 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import os
 import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
+from groq import Groq
 
 # Import your Phase 1 Analytics modules
 from analytics.loader import DatasetLoader
@@ -34,12 +36,123 @@ st.set_page_config(
 )
 
 # ==========================================
+# PHASE 2B: INSIGHT ENGINE (Fact-backed Narratives)
+# ==========================================
+class InsightEngine:
+    """
+    Computes statistical facts, data quality flags, and correlations using Pandas,
+    then uses Groq to synthesize them into clean, professional insight cards.
+    """
+    def __init__(self, df: pd.DataFrame, api_key: str = None):
+        self.df = df.copy()
+        self.df.columns = [str(c).strip() for c in self.df.columns]
+        self.client = Groq(api_key=api_key or os.getenv("GROQ_API_KEY"))
+        self.model_name = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+
+    def compute_deterministic_facts(self) -> dict:
+        """Extracts 5 distinct raw analytical facts using Pandas."""
+        facts = {}
+        rows, cols = self.df.shape
+        missing_cells = int(self.df.isna().sum().sum())
+        duplicates = int(self.df.duplicated().sum())
+        
+        facts["quality"] = {
+            "rows": rows,
+            "columns": cols,
+            "missing_cells": missing_cells,
+            "duplicates": duplicates
+        }
+
+        cat_cols = self.df.select_dtypes(include=['object', 'category']).columns
+        if len(cat_cols) > 0:
+            top_cat_col = cat_cols[0]
+            vc = self.df[top_cat_col].value_counts()
+            facts["top_category"] = {
+                "column": top_cat_col,
+                "dominant_value": str(vc.index[0]),
+                "count": int(vc.iloc[0]),
+                "percentage": float((vc.iloc[0] / rows) * 100) if rows > 0 else 0
+            }
+
+        num_cols = self.df.select_dtypes(include=[np.number]).columns
+        if len(num_cols) > 0:
+            primary_num = num_cols[0]
+            series = pd.to_numeric(self.df[primary_num], errors="coerce").dropna()
+            facts["numeric_summary"] = {
+                "column": primary_num,
+                "mean": float(series.mean()),
+                "median": float(series.median()),
+                "std": float(series.std())
+            }
+
+            q1 = series.quantile(0.25)
+            q3 = series.quantile(0.75)
+            iqr = q3 - q1
+            outliers = series[(series < (q1 - 1.5 * iqr)) | (series > (q3 + 1.5 * iqr))]
+            facts["outliers"] = {
+                "column": primary_num,
+                "count": int(len(outliers))
+            }
+
+        if len(num_cols) >= 2:
+            corr_matrix = self.df[num_cols].corr().abs()
+            corr_values = corr_matrix.values.copy() # Make writable copy to avoid read-only error
+            np.fill_diagonal(corr_values, 0)
+            max_corr = corr_values.max()
+            if not np.isnan(max_corr) and max_corr > 0.3:
+                unstacked = corr_matrix.unstack()
+                filtered = unstacked[unstacked < 0.999]
+                if not filtered.empty:
+                    col1, col2 = filtered.idxmax()
+                    facts["strongest_correlation"] = {
+                        "col1": col1,
+                        "col2": col2,
+                        "value": float(self.df[col1].corr(self.df[col2]))
+                    }
+
+        return facts
+
+    def generate_insight_narratives(self, facts: dict) -> list:
+        """Sends verified facts to Groq to generate clean, readable bullet points."""
+        prompt = f"""
+        You are a senior data analyst. Based strictly on the following verified computational facts extracted from a dataset, generate exactly 5 distinct, engaging, and professional insight bullet points.
+        
+        Verified Facts:
+        {facts}
+
+        Rules:
+        - Do not modify or invent numbers. Use the exact values provided in the facts.
+        - Format each insight clearly starting with an appropriate emoji and bold title.
+        - Keep each insight concise and actionable.
+        """
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2
+            )
+            text = response.choices[0].message.content
+            if text:
+                lines = [line.strip() for line in text.split("\n") if line.strip()]
+                cleaned = []
+                for l in lines:
+                    cleaned_line = l.lstrip("•-*0123456789. ").strip()
+                    if cleaned_line:
+                        cleaned.append(f"💡 {cleaned_line}")
+                return cleaned[:5] if cleaned else [text]
+        except Exception as e:
+            logger.exception("Failed to generate insight narrative via Groq")
+
+        return [
+            f"📊 Dataset contains {facts.get('quality', {}).get('rows', 0):,} rows and {facts.get('quality', {}).get('columns', 0)} columns.",
+            f"🧹 Data quality check found {facts.get('quality', {}).get('missing_cells', 0)} missing values and {facts.get('quality', {}).get('duplicates', 0)} duplicate rows."
+        ]
+
+# ==========================================
 # SEMANTIC COLUMN ROLE DETECTOR ENGINE
 # ==========================================
 def classify_column_role(col, df):
-    """
-    Classifies a column into its explicit semantic role to make InsightIQ dataset-agnostic[cite: 4].
-    """
     col_lower = col.lower().replace("_", " ").replace("-", " ").strip()
     series = df[col]
     n_total = len(df)
@@ -98,9 +211,6 @@ def find_best_categorical(df):
 # SEMANTICALLY PRECISE & REFINED KPI ENGINE
 # ==========================================
 def get_dynamic_kpis(df):
-    """
-    Generates only strictly meaningful KPIs based on column semantics without forcing generic fallbacks[cite: 5].
-    """
     kpis = []
     roles = get_column_roles_summary(df)
     
@@ -114,7 +224,7 @@ def get_dynamic_kpis(df):
         rec_label = "🎓 TOTAL STUDENTS"
     elif any(k in c.lower() for c in df.columns for k in ["title", "show_id"]):
         rec_label = "🎬 TOTAL TITLES"
-    elif any(k in c.lower() for c in df.columns for k in ["invoice", "transaction", "sale", "ticket"]):
+    elif any(k in c.lower() for c in df.columns for k in ["invoice", "transaction", "sale", "ticket", "booking"]):
         rec_label = "🧾 TOTAL TRANSACTIONS"
 
     kpis.append({"label": rec_label, "value": f"{row_count:,}"})
@@ -123,7 +233,7 @@ def get_dynamic_kpis(df):
     for col, role in roles.items():
         if role == "Numeric measurement":
             col_l = col.lower()
-            if any(kw in col_l for kw in ["total", "sales", "revenue", "income", "amount", "fare", "price", "age"]):
+            if any(kw in col_l for kw in ["total", "sales", "revenue", "income", "amount", "fare", "price", "age", "lead_time"]):
                 financial_col = col
                 break
 
@@ -132,12 +242,12 @@ def get_dynamic_kpis(df):
         if any(kw in col_l for kw in ["total", "sales", "revenue", "income", "amount"]):
             total_sum = df[financial_col].sum()
             kpis.append({"label": f"💰 TOTAL {financial_col.replace('_', ' ').upper()}", "value": f"${total_sum:,.2f}"})
+        elif "lead_time" in col_l:
+            avg_val = df[financial_col].mean()
+            kpis.append({"label": "⏳ AVG LEAD TIME", "value": f"{avg_val:,.1f} days"})
         elif "price" in col_l or "fare" in col_l or "unit" in col_l:
             avg_val = df[financial_col].mean()
             kpis.append({"label": f"💵 AVG {financial_col.replace('_', ' ').upper()}", "value": f"${avg_val:,.2f}"})
-        elif "age" in col_l:
-            avg_val = df[financial_col].mean()
-            kpis.append({"label": "📊 AVERAGE AGE", "value": f"{avg_val:,.1f}"})
         else:
             avg_val = df[financial_col].mean()
             kpis.append({"label": f"📊 AVG {financial_col.replace('_', ' ').upper()}", "value": f"${avg_val:,.2f}"})
@@ -153,8 +263,8 @@ def get_dynamic_kpis(df):
                     kpis.append({"label": "❤️ SURVIVAL RATE", "value": f"{pct:.1f}%"})
                 elif "churn" in col_l:
                     kpis.append({"label": "⚡ CHURN RATE", "value": f"{pct:.1f}%"})
-                elif "type" in col_l:
-                    kpis.append({"label": f"🎥 TOP {col.upper()} SHARE", "value": f"{pct:.1f}%"})
+                elif "cancel" in col_l:
+                    kpis.append({"label": "❌ CANCELLATION RATE", "value": f"{pct:.1f}%"})
                 else:
                     kpis.append({"label": f"📌 {col.replace('_', ' ').upper()} RATE", "value": f"{pct:.1f}%"})
             break
@@ -162,36 +272,8 @@ def get_dynamic_kpis(df):
             mean_val = df[col].mean()
             kpis.append({"label": f"⭐ AVERAGE {col.replace('_', ' ').upper()}", "value": f"{mean_val:,.2f}"})
             break
-        elif any(kw in col_l for kw in ["quantity", "qty"]):
-            total_qty = df[col].sum()
-            kpis.append({"label": f"📦 TOTAL {col.replace('_', ' ').upper()}", "value": f"{total_qty:,}"})
-            break
 
-    gender_col = next((c for c in df.columns if "sex" in c.lower() or "gender" in c.lower()), None)
-    if gender_col:
-        vc_g = df[gender_col].dropna().astype(str).str.lower().value_counts()
-        fem_keys = [k for k in vc_g.index if any(f in k for f in ["female", "f", "woman", "women"])]
-        if fem_keys:
-            pct_f = (vc_g[fem_keys[0]] / vc_g.sum()) * 100
-            kpis.append({"label": "👩 FEMALE SHARE", "value": f"{pct_f:.1f}%"})
-    else:
-        nom_cols = [col for col, role in roles.items() if role == "Nominal categorical" and col not in [c.get("label", "").lower() for c in kpis]]
-        if nom_cols:
-            n_col = nom_cols[0]
-            unique_cnt = df[n_col].nunique()
-            kpis.append({"label": f"🔹 UNIQUE {n_col.replace('_', ' ').upper()}", "value": f"{unique_cnt:,}"})
-
-    return kpis
-
-def get_dynamic_suggestions(df):
-    suggestions = ["Total records?", "Summary statistics?"]
-    if any("age" in c.lower() for c in df.columns):
-        suggestions.append("Average age?")
-    if any(k in c.lower() for c in df.columns for k in ["price", "amount", "revenue", "sales", "fare", "total"]):
-        suggestions.append("Average sales or amount?")
-    while len(suggestions) < 6:
-        suggestions.append("Tell me about this dataset.")
-    return suggestions[:6]
+    return kpis[:4]
 
 def main():
     # --- SIDEBAR ---
@@ -222,8 +304,10 @@ def main():
         
         profiler_temp = DatasetProfiler(current_df)
         profile_temp = profiler_temp.generate_profile()
-        insight_engine_temp = InsightGenerator(current_df, profile_temp)
-        insights_temp = insight_engine_temp.generate_insights()
+        
+        insight_engine_temp = InsightEngine(current_df)
+        raw_facts_temp = insight_engine_temp.compute_deterministic_facts()
+        insights_temp = insight_engine_temp.generate_insight_narratives(raw_facts_temp)
         
         report_content = f"""========================================
    INSIGHTIQ ANALYTICS REPORT
@@ -238,7 +322,7 @@ KEY INSIGHTS & FINDINGS:
 ----------------------------------------
 """
         for ins in insights_temp:
-            report_content += f"• {ins}\n"
+            report_content += f"{ins}\n"
             
         report_content += "\n========================================\nGenerated by InsightIQ Engine"
 
@@ -321,7 +405,7 @@ KEY INSIGHTS & FINDINGS:
             roles_map = get_column_roles_summary(active_df)
             roles_df = pd.DataFrame(list(roles_map.items()), columns=["Column Name", "Detected Semantic Role"])
             st.dataframe(roles_df, use_container_width=True)
-            st.info("InsightIQ automatically inspects every column to assign roles (Identifier, Numeric measurement, Binary categorical, Date/year, Target variable, etc.) ensuring robust dataset-agnostic intelligence[cite: 4].")
+            st.info("InsightIQ automatically inspects every column to assign roles (Identifier, Numeric measurement, Binary categorical, Date/year, Target variable, etc.) ensuring robust dataset-agnostic intelligence.")
 
         with tab3:
             st.subheader("🧹 Dataset Cleaning Suite")
@@ -370,10 +454,23 @@ KEY INSIGHTS & FINDINGS:
 
         with tab6:
             st.subheader("💡 Automated Insight Generator")
-            insight_engine = InsightGenerator(active_df, profile)
-            key_insights = insight_engine.generate_insights()
-            for insight in key_insights:
-                st.success(f"• {insight}")
+            st.markdown("Fact-backed patterns and data intelligence synthesized by Groq.")
+            
+            with st.spinner("Computing facts and synthesizing insights..."):
+                try:
+                    insight_engine = InsightEngine(active_df)
+                    facts = insight_engine.compute_deterministic_facts()
+                    insights = insight_engine.generate_insight_narratives(facts)
+                    
+                    if insights:
+                        for insight in insights:
+                            st.info(insight)
+                    else:
+                        st.warning("No insights were returned. Displaying raw computed facts:")
+                        st.json(facts)
+                except Exception as e:
+                    st.error(f"Error generating insights: {str(e)}")
+                    logger.exception("Insight generation failed")
 
         with tab7:
             st.markdown("### 🤖 AI DATA ANALYST")
@@ -424,7 +521,7 @@ KEY INSIGHTS & FINDINGS:
                                     with st.expander("View verified calculation"):
                                         st.json(raw_result, expanded=True)
 
-                                # Chart Rendering Pipeline Fix
+                                # Chart Rendering Pipeline
                                 chart_fig = None
                                 if instruction.get("chart_type") in ["bar", "line"] and isinstance(raw_result, (dict, list)):
                                     try:
