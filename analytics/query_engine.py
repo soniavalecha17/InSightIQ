@@ -1,39 +1,24 @@
-
-import logging
 import pandas as pd
+import logging
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
-
 class QueryEngine:
+    """
+    Deterministic Pandas-based query execution engine ensuring strict adherence 
+    to structured instructions without AI calculation hallucinations.
+    """
     def __init__(self, df: pd.DataFrame):
+        # Strip trailing/leading spaces from column names automatically
         self.df = df.copy()
-
-    def resolve_column(self, requested):
-        """Resolve column names without case or surrounding-space sensitivity."""
-        if requested is None or not str(requested).strip():
-            return None
-
-        lookup = {
-            str(col).strip().casefold(): col
-            for col in self.df.columns
-        }
-        return lookup.get(str(requested).strip().casefold())
-
-    def _numeric_series(self, df, column):
-        """Convert a column to numeric values, excluding invalid entries."""
-        if column is None or column not in df.columns:
-            return None
-
-        return pd.to_numeric(
-            df[column], errors="coerce"
-        ).dropna()
+        self.df.columns = [str(c).strip() for c in self.df.columns]
 
     def get_dataset_summary(self) -> dict:
         categories_sample = {}
         for col in self.df.select_dtypes(include=['object', 'category']).columns:
             categories_sample[col] = self.df[col].dropna().unique().tolist()[:15]
-        
+
         return {
             "dtypes": {col: str(dtype) for col, dtype in self.df.dtypes.items()},
             "rows": len(self.df),
@@ -41,257 +26,168 @@ class QueryEngine:
             "categorical_sample": categories_sample
         }
 
-    def _apply_filters(self, df, filters):
-        """Apply validated filters and return the filtered DataFrame."""
-        df = df.copy()
+    def apply_filters(self, df: pd.DataFrame, filters: list) -> pd.DataFrame:
+        """Applies list of filters robustly with type conversions and safe handling."""
+        filtered_df = df.copy()
+        for f in filters:
+            if not isinstance(f, dict):
+                continue
+            col = str(f.get("column", "")).strip()
+            op = f.get("operator")
+            val = f.get("value")
 
-        allowed_operators = {
-            "==", "!=", ">", "<", ">=", "<=", "contains"
-        }
+            if col not in filtered_df.columns:
+                continue
 
-        for condition in filters:
-            column = self.resolve_column(condition.get("column"))
-            operator = condition.get("operator")
-            value = condition.get("value")
+            series = filtered_df[col]
 
-            if column is None:
-                raise ValueError(
-                    f"Filter column '{condition.get('column')}' not found."
-                )
+            if op == "==":
+                filtered_df = filtered_df[series.astype(str).str.casefold() == str(val).casefold()]
+            elif op == "!=":
+                filtered_df = filtered_df[series.astype(str).str.casefold() != str(val).casefold()]
+            elif op in [">", "<", ">=", "<="]:
+                num_series = pd.to_numeric(series, errors="coerce")
+                num_val = pd.to_numeric(val, errors="coerce")
+                if pd.notna(num_val):
+                    if op == ">": filtered_df = filtered_df[num_series > num_val]
+                    elif op == "<": filtered_df = filtered_df[num_series < num_val]
+                    elif op == ">=": filtered_df = filtered_df[num_series >= num_val]
+                    elif op == "<=": filtered_df = filtered_df[num_series <= num_val]
+            elif op == "contains":
+                filtered_df = filtered_df[series.astype(str).str.contains(str(val), case=False, na=False)]
 
-            if operator not in allowed_operators:
-                raise ValueError(
-                    f"Unsupported filter operator: {operator}"
-                )
+        return filtered_df
 
-            series = df[column]
+    def apply_comparison(self, df: pd.DataFrame, comparison: dict) -> pd.DataFrame:
+        """Executes column-to-column or safe fall-through comparisons."""
+        left_col = str(comparison.get("left_col", "")).strip()
+        operator = comparison.get("operator")
+        right_col = str(comparison.get("right_col", "")).strip()
 
-            if operator == "contains":
-                mask = series.astype("string").str.contains(
-                    str(value), case=False, na=False, regex=False
-                )
+        if left_col not in df.columns:
+            return df  # Return unmodified if left column isn't found
 
-            elif operator in {"==", "!="}:
-                if pd.api.types.is_numeric_dtype(series):
-                    number = pd.to_numeric(value, errors="coerce")
+        left = pd.to_numeric(df[left_col], errors="coerce")
 
-                    if pd.isna(number):
-                        raise ValueError(
-                            f"'{value}' is not a valid numeric filter value."
-                        )
-
-                    mask = (
-                        pd.to_numeric(series, errors="coerce") == number
-                    )
-                else:
-                    left = series.astype("string").str.strip().str.casefold()
-                    right = str(value).strip().casefold()
-                    mask = left == right
-
-                if operator == "!=":
-                    # Missing values should not count as unequal matches.
-                    mask = mask & series.notna() if operator == "!=" else mask
-
-            else:
-                number = pd.to_numeric(value, errors="coerce")
-                numeric_series = pd.to_numeric(series, errors="coerce")
-
-                if pd.isna(number):
-                    raise ValueError(
-                        f"'{value}' is not a valid numeric filter value."
-                    )
-
-                if operator == ">":
-                    mask = numeric_series > number
-                elif operator == "<":
-                    mask = numeric_series < number
-                elif operator == ">=":
-                    mask = numeric_series >= number
-                else:
-                    mask = numeric_series <= number
-
-            df = df.loc[mask.fillna(False)]
+        # If right_col is an actual column in the dataframe:
+        if right_col in df.columns:
+            right = pd.to_numeric(df[right_col], errors="coerce")
+            valid = left.notna() & right.notna()
+            operators = {
+                "<": left < right,
+                "<=": left <= right,
+                ">": left > right,
+                ">=": left >= right,
+                "==": left == right,
+                "!=": left != right,
+            }
+            if operator in operators:
+                return df.loc[valid & operators[operator]]
+        else:
+            # Fallback: right_col is actually a literal numeric value (e.g., "50")
+            num_val = pd.to_numeric(right_col, errors="coerce")
+            if pd.notna(num_val):
+                operators = {
+                    "<": left < num_val,
+                    "<=": left <= num_val,
+                    ">": left > num_val,
+                    ">=": left >= num_val,
+                    "==": left == num_val,
+                    "!=": left != num_val,
+                }
+                if operator in operators:
+                    return df.loc[left.notna() & operators[operator]]
 
         return df
 
-    def execute_query(self, query_instruction: dict):
-        """Execute a structured analytical instruction on the dataset."""
-        if not isinstance(query_instruction, dict):
-            return "Invalid query instruction."
+    def get_extreme_row(self, df: pd.DataFrame, target_col: str, highest: bool = True) -> dict:
+        """Returns the full matching row dictionary for highest/lowest value queries."""
+        if target_col not in df.columns:
+            return None
+        
+        values = pd.to_numeric(df[target_col], errors="coerce")
+        if values.notna().sum() == 0:
+            return None
+            
+        index = values.idxmax() if highest else values.idxmin()
+        return df.loc[index].to_dict()
 
-        if "error" in query_instruction:
-            return query_instruction["error"]
+    def execute_query(self, instruction: dict) -> Any:
+        """Executes the validated analytical instruction against the Pandas DataFrame."""
+        op = instruction.get("operation_type")
+        target = str(instruction.get("target_col", "")).strip()
+        group = str(instruction.get("group_col", "")).strip()
+        filters = instruction.get("filters", [])
+        comparison = instruction.get("comparison")
 
-        op = query_instruction.get("operation_type")
+        # 1. Apply literal filters
+        work_df = self.apply_filters(self.df, filters)
 
-        if op == "unknown":
-            return query_instruction.get(
-                "explanation",
-                "I couldn't map that question to a supported calculation."
-            )
+        # 2. Apply comparison if populated
+        if isinstance(comparison, dict) and comparison.get("left_col"):
+            work_df = self.apply_comparison(work_df, comparison)
 
-        target_requested = query_instruction.get("target_col", "")
-        group_requested = query_instruction.get("group_col", "")
+        # 3. Dispatch Operation
+        if op in ["count", "count_where"]:
+            return int(len(work_df))
 
-        target = self.resolve_column(target_requested)
-        group = self.resolve_column(group_requested)
+        elif op == "mean":
+            if target not in work_df.columns:
+                return f"Error: Target column '{target}' not found."
+            return float(pd.to_numeric(work_df[target], errors="coerce").mean())
 
-        target_required = {
-            "mean", "sum", "max", "min", "median",
-            "unique_count", "highest_group", "lowest_group",
-            "highest_group_mean", "lowest_group_mean",
-            "top_n", "group_mean", "group_sum",
-        }
+        elif op == "sum":
+            if target not in work_df.columns:
+                return f"Error: Target column '{target}' not found."
+            return float(pd.to_numeric(work_df[target], errors="coerce").sum())
 
-        group_required = {
-            "highest_group", "lowest_group",
-            "highest_group_mean", "lowest_group_mean",
-            "group_mean", "group_sum", "group_count",
-        }
+        elif op == "max":
+            if target not in work_df.columns:
+                return f"Error: Target column '{target}' not found."
+            extreme_row = self.get_extreme_row(work_df, target, highest=True)
+            return extreme_row if extreme_row else float(pd.to_numeric(work_df[target], errors="coerce").max())
 
-        if op not in {
-            "mean", "sum", "max", "min", "median",
-            "count", "unique_count", "highest_group",
-            "lowest_group", "highest_group_mean",
-            "lowest_group_mean", "top_n", "group_mean",
-            "group_sum", "group_count",
-        }:
-            return f"Unsupported operation: {op}"
+        elif op == "min":
+            if target not in work_df.columns:
+                return f"Error: Target column '{target}' not found."
+            extreme_row = self.get_extreme_row(work_df, target, highest=False)
+            return extreme_row if extreme_row else float(pd.to_numeric(work_df[target], errors="coerce").min())
 
-        if op in target_required and target is None:
-            return f"A valid target column is required for '{op}'."
+        elif op == "median":
+            if target not in work_df.columns:
+                return f"Error: Target column '{target}' not found."
+            return float(pd.to_numeric(work_df[target], errors="coerce").median())
 
-        if op in group_required and group is None:
-            return f"A valid grouping column is required for '{op}'."
+        elif op == "unique_count":
+            if target not in work_df.columns:
+                return f"Error: Target column '{target}' not found."
+            return int(work_df[target].nunique())
 
-        try:
-            df = self._apply_filters(
-                self.df, query_instruction.get("filters", [])
-            )
-        except (ValueError, TypeError) as exc:
-            return f"Filter error: {exc}"
+        elif op == "group_mean":
+            if not group or target not in work_df.columns:
+                return "Error: group_mean requires valid group and target columns."
+            grouped = work_df.groupby(group)[target].apply(lambda s: pd.to_numeric(s, errors="coerce").mean())
+            return grouped.to_dict()
 
-        if df.empty:
-            return "No matching records found after applying filters."
+        elif op == "group_sum":
+            if not group or target not in work_df.columns:
+                return "Error: group_sum requires valid group and target columns."
+            grouped = work_df.groupby(group)[target].apply(lambda s: pd.to_numeric(s, errors="coerce").sum())
+            return grouped.to_dict()
 
-        # Single-column numeric aggregations
-        if op in {"mean", "sum", "max", "min", "median"}:
-            values = self._numeric_series(df, target)
+        elif op == "group_count":
+            if not group:
+                return "Error: group_count requires a grouping column."
+            grouped = work_df.groupby(group).size()
+            return grouped.to_dict()
 
-            if values is None or values.empty:
-                return f"No valid numeric values found in '{target}'."
-
-            if op == "mean":
-                result = values.mean()
-            elif op == "sum":
-                result = values.sum()
-            elif op == "max":
-                result = values.max()
-            elif op == "min":
-                result = values.min()
-            else:
-                result = values.median()
-
-            return float(result)
-
-        # Count all rows after filtering
-        if op == "count":
-            return int(len(df))
-
-        if op == "unique_count":
-            return int(df[target].nunique(dropna=True))
-
-        # Include missing group labels rather than silently dropping rows
-        grouped_df = df.copy()
-        grouped_df[group] = grouped_df[group].astype("object")
-        grouped_df[group] = grouped_df[group].where(
-            grouped_df[group].notna(), "(Missing)"
-        )
-
-        if op == "group_count":
-            return grouped_df.groupby(
-                group, dropna=False, sort=False
-            ).size().to_dict()
-
-        # Grouped numerical calculations
-        if op in {
-            "group_sum", "group_mean",
-            "highest_group", "lowest_group",
-            "highest_group_mean", "lowest_group_mean",
-        }:
-            numeric_values = pd.to_numeric(
-                grouped_df[target], errors="coerce"
-            )
-
-            valid = grouped_df.loc[
-                numeric_values.notna(), [group]
-            ].copy()
-
-            valid[target] = numeric_values.loc[numeric_values.notna()]
-
-            if valid.empty:
-                return f"No valid numeric values found in '{target}'."
-
-            aggregation = (
-                "mean"
-                if op in {"group_mean", "highest_group_mean",
-                          "lowest_group_mean"}
-                else "sum"
-            )
-
-            grouped = valid.groupby(
-                group, dropna=False, sort=False
-            )[target]
-
-            if aggregation == "mean":
-                result = grouped.mean()
-            else:
-                result = grouped.sum()
-
-            if op in {"group_mean", "group_sum"}:
-                return {
-                    str(key): float(value)
-                    for key, value in result.items()
-                }
-
-            item = (
-                result.idxmax()
-                if op in {"highest_group", "highest_group_mean"}
-                else result.idxmin()
-            )
-
-            return {
-                "item": str(item),
-                "value": float(result.loc[item]),
-                "group_col": group,
-                "target_col": target,
-                "aggregation": aggregation,
-            }
-
-        if op == "top_n":
-            n = query_instruction.get("n", 5)
-
-            try:
-                n = int(n)
-            except (TypeError, ValueError):
-                return "The number of top records must be an integer."
-
-            if n < 1:
-                return "The number of top records must be at least 1."
-
-            numeric_values = pd.to_numeric(
-                df[target], errors="coerce"
-            )
-
-            ranked = df.loc[numeric_values.notna()].copy()
-            ranked[target] = numeric_values.loc[numeric_values.notna()]
-            ranked = ranked.sort_values(
-                by=target, ascending=False
-            ).head(n)
-
-            if ranked.empty:
-                return f"No valid numeric values found in '{target}'."
-
-            return ranked.to_dict(orient="records")
+        elif op in ["highest_group", "lowest_group"]:
+            if not group or target not in work_df.columns:
+                return f"Error: {op} requires group and target columns."
+            agg = work_df.groupby(group)[target].apply(lambda s: pd.to_numeric(s, errors="coerce").sum())
+            if agg.empty:
+                return "No data available."
+            best_group = agg.idxmax() if op == "highest_group" else agg.idxmin()
+            return {str(best_group): float(agg[best_group])}
 
         return f"Unsupported operation: {op}"

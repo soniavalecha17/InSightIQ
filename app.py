@@ -454,12 +454,9 @@ KEY INSIGHTS & FINDINGS:
                                     except Exception as e:
                                         logger.error(f"Failed to render chart: {e}")
 
-                        except Exception:
+                        except Exception as e:
                             logger.exception("AI Analyst request failed")
-                            final_answer = (
-                                "I couldn't complete that analysis. Please check the "
-                                "application logs and try again."
-                            )
+                            final_answer = f"⚠️ **Execution Error:** {str(e)}"
                             st.error(final_answer)
                             raw_result = None
                             instruction = None

@@ -22,32 +22,39 @@ class AIAnalyst:
         system_prompt = """You are an AI data analyst backend. Map user natural language questions into the required JSON structure.
         You MUST respond ONLY with a valid JSON object matching this exact schema:
         {
-            "operation_type": "mean | sum | max | min | median | count | unique_count | highest_group | lowest_group | highest_group_mean | lowest_group_mean | top_n | group_mean | group_sum | group_count | unknown",
+            "operation_type": "mean | sum | max | min | median | count | unique_count | highest_group | lowest_group | highest_group_mean | lowest_group_mean | top_n | group_mean | group_sum | group_count | count_where | unknown",
             "target_col": "Exact dataset column name or empty string",
             "group_col": "Exact dataset grouping column or empty string",
             "filters": [
                 {
                     "column": "Exact column name",
                     "operator": "== | != | > | < | >= | <= | contains",
-                    "value": "Threshold value as string or number"
+                    "value": "Literal threshold value as string or number"
                 }
             ],
+            "comparison": {
+                "left_col": "Exact left column name",
+                "operator": "< | <= | > | >= | == | !=",
+                "right_col": "Exact right column name to compare against"
+            },
             "chart_type": "bar | line | pie | scatter | none",
             "chart_title": "Descriptive chart title",
             "explanation": "Friendly explanation or fallback message"
         }
-        CRITICAL RULES:
-        1. Do NOT treat descriptive nouns or domain context phrases (like "across all grocery products", "total items", "overall") as filters unless the user explicitly specifies a condition using words like "where", "filter by", or "equal to".
-        2. If no explicit condition or threshold is given, leave the "filters" array completely empty (`[]`) and compute the requested metric globally across the target column.
-        3. Never invent column names. Select columns only from the supplied dataset schema.
-        4. Use empty string for target_col or group_col when not needed.
+        CRITICAL RULES FOR FILTERS VS COMPARISONS:
+        1. **Column-to-Literal Filters (`filters`)**: Use when filtering by a fixed number, string, or threshold (e.g., "price greater than 50", "rating above 4", "where status is active"). Populate the `filters` array and set `comparison` to null or empty strings.
+           - Example: "How many products have a price greater than 50?" -> operation_type: "count", filters: [{"column": "Price", "operator": ">", "value": 50}], comparison: null.
+        2. **Column-to-Column Comparisons (`comparison`)**: Use ONLY when comparing two different columns against each other (e.g., "Stock below Reorder_Level", "sales greater than cost"). Populate the `comparison` object and leave `filters` empty (`[]`).
+        3. Do NOT treat general descriptive text ("across all products") as filters.
+        4. Never invent column names. Select columns only from the supplied dataset schema.
         """
-        
+
         user_prompt = f"""
         Dataset Summary:
         - Columns and Types: {json.dumps(dataset_summary.get('dtypes', {}))}
         - Total Rows: {dataset_summary.get('rows', dataset_summary.get('shape', [0,0])[0])}
         - Columns List: {dataset_summary.get('columns', list(dataset_summary.get('dtypes', {}).keys()))}
+        - Categorical Samples: {json.dumps(dataset_summary.get('categorical_sample', {}))}
 
         User Question: "{question}"
         """
@@ -98,38 +105,25 @@ class AIAnalyst:
             "count", "unique_count", "highest_group",
             "lowest_group", "highest_group_mean",
             "lowest_group_mean", "top_n", "group_mean",
-            "group_sum", "group_count", "unknown"
+            "group_sum", "group_count", "count_where", "unknown"
         }
         op = instruction.get("operation_type")
         if op not in allowed_operations:
             return {"error": f"Unsupported analytical operation: {op}"}
 
-        target = instruction.get("target_col", "")
-        group = instruction.get("group_col", "")
-        
-        target_required = {
-            "mean", "sum", "max", "min", "median",
-            "unique_count", "highest_group", "lowest_group",
-            "highest_group_mean", "lowest_group_mean",
-            "top_n", "group_mean", "group_sum"
-        }
-        group_required = {
-            "highest_group", "lowest_group",
-            "highest_group_mean", "lowest_group_mean",
-            "group_mean", "group_sum", "group_count"
-        }
-
-        if op in target_required and not target:
-            return {"error": f"Operation '{op}' requires a target column."}
-        if op in group_required and not group:
-            return {"error": f"Operation '{op}' requires a grouping column."}
-
-        if op in {"group_mean", "group_sum", "highest_group_mean", "lowest_group_mean"}:
-            numeric_cols = dataset_summary.get("dtypes", {})
-            if target and target in numeric_cols:
-                dtype = numeric_cols[target]
-                if not any(t in dtype.lower() for t in ("int", "float", "uint", "numeric", "decimal")):
-                    return {"error": f"Column '{target}' must be numeric for '{op}'."}
+        # Validate comparison object if operation is count_where
+        comp = instruction.get("comparison")
+        if op == "count_where":
+            if not isinstance(comp, dict):
+                return {"error": "Operation 'count_where' requires a valid comparison object."}
+            for k in ("left_col", "right_col"):
+                c_col = comp.get(k, "")
+                if c_col:
+                    matches = [c for c in valid_columns if str(c).strip().casefold() == str(c_col).strip().casefold()]
+                    if matches:
+                        comp[k] = matches[0]
+                    else:
+                        return {"error": f"Invalid comparison column: {c_col}"}
 
         allowed_operators = {"==", "!=", ">", "<", ">=", "<=", "contains"}
         for f in instruction.get("filters", []):
