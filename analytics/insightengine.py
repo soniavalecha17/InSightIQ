@@ -141,7 +141,6 @@ class InsightEngine:
             col_lower = col.lower()
             score = 0
             
-            # Prefer columns with a useful number of groups.
             if 2 <= unique_count <= 20:
                 score += 10
             elif 21 <= unique_count <= 50:
@@ -149,12 +148,44 @@ class InsightEngine:
             elif unique_count > 50:
                 score -= 10
                 
-            # Keyword scoring
             if any(pk in col_lower for pk in preferred_keywords):
                 score += 15
             if any(dk in col_lower for dk in discouraged_keywords):
                 score -= 20
                 
+            if score > best_score:
+                best_score = score
+                best_col = col
+        return best_col
+
+    def select_best_continuous_numerical_column(self, column_roles: dict) -> str:
+        """Selects a meaningful continuous numerical column for outlier/distribution analysis, avoiding binary flags."""
+        numerical_cols = [
+            col for col, role in column_roles.items()
+            if role == "numerical"
+        ]
+        if not numerical_cols:
+            return None
+            
+        preferred_keywords = [
+            "lead_time", "adr", "price", "amount", "cost", "sales", 
+            "revenue", "quantity", "score", "days", "waiting"
+        ]
+        
+        best_col = numerical_cols[0]
+        best_score = float("-inf")
+        
+        for col in numerical_cols:
+            col_lower = col.lower()
+            series = pd.to_numeric(self.df[col], errors="coerce").dropna()
+            if series.nunique() <= 2:
+                continue # Skip binary-like numerical columns
+                
+            score = 0
+            if any(pk in col_lower for pk in preferred_keywords):
+                score += 20
+            score += min(series.nunique(), 10) # prefer higher cardinality measurements
+            
             if score > best_score:
                 best_score = score
                 best_col = col
@@ -173,7 +204,7 @@ class InsightEngine:
         if not primary_cat:
             return comparisons
 
-        # 1. Binary Group Comparisons
+        # 1. Binary Group Comparisons (e.g. cancellation rates across hotel types / market segments)
         binary_comparisons = {}
         for target_bin in binary_cols[:2]:
             norm_series, mapping_desc = self.normalize_binary(self.df[target_bin])
@@ -322,11 +353,13 @@ class InsightEngine:
                     "unique_categories": int(vc.count())
                 }
 
-        numerical_cols = [col for col, ctype in column_roles.items() if ctype == "numerical"]
+        # Select a proper continuous numerical column for numerical/outlier analysis (Priority 1)
+        primary_num = self.select_best_continuous_numerical_column(column_roles)
         numerical_summaries = {}
         outlier_summaries = {}
-        for num_col in numerical_cols[:3]:
-            series = pd.to_numeric(self.df[num_col], errors="coerce").dropna()
+        
+        if primary_num:
+            series = pd.to_numeric(self.df[primary_num], errors="coerce").dropna()
             if len(series) > 0:
                 mean_val = round(float(series.mean()), 2)
                 median_val = round(float(series.median()), 2)
@@ -337,7 +370,7 @@ class InsightEngine:
                     else None
                 )
                 
-                numerical_summaries[num_col] = {
+                numerical_summaries[primary_num] = {
                     "mean": mean_val,
                     "median": median_val,
                     "std": std_val
@@ -352,13 +385,13 @@ class InsightEngine:
                     outliers = series[(series < lower_bound) | (series > upper_bound)]
                     outlier_count = int(outliers.count())
                     outlier_pct = round((outlier_count / len(series)) * 100, 2)
-                    outlier_summaries[num_col] = {
+                    outlier_summaries[primary_num] = {
                         "method": "Interquartile Range (IQR)",
                         "count": outlier_count,
                         "percentage": f"{outlier_pct:.2f}%"
                     }
                 else:
-                    outlier_summaries[num_col] = {"method": "IQR", "count": 0, "percentage": "0.00%", "note": "IQR is zero"}
+                    outlier_summaries[primary_num] = {"method": "IQR", "count": 0, "percentage": "0.00%", "note": "IQR is zero"}
 
         # Business Insights with dynamic positive outcome definition
         binary_cols = [
@@ -415,7 +448,7 @@ class InsightEngine:
         }
 
     def generate_insight_narratives(self, facts: dict) -> list:
-        """Layer 3: Send verified facts to Groq with strict sequential ordered heading validation."""
+        """Layer 3: Send verified facts to Groq with strict sequential ordered heading validation and formatting rules."""
         prompt = f"""
         You are a senior data analyst. Based strictly on the following verified computational facts, generate exactly 5 distinct professional insight cards corresponding to these exact category headers in sequential order:
         1. Dataset Overview
@@ -428,14 +461,14 @@ class InsightEngine:
         {facts}
 
         Rules:
-        - Strict Accuracy: Use exact numbers provided. Format all percentages and numerical averages to exactly two decimal places.
+        - Strict Accuracy & Formatting: Use exact numbers provided. Format all percentages and numerical values consistently to exactly two decimal places (e.g., 37.04% instead of raw unformatted decimals). Never perform outlier assessment on binary columns; outlier assessment must target continuous numerical columns.
         - Required Ordered Prefixes: Each card must start strictly with these prefixes in this exact order:
           1) '📊 Dataset Overview — '
           2) '📊 Data Quality — '
           3) '📊 Categorical Patterns — '
           4) '📊 Numerical Analysis & Outliers — '
           5) '📊 Category Comparisons & Business Insights — '
-        - Neutral & Evidence-Based: Avoid causal claims or unverified conclusions.
+        - Grounded & Cautious: Distinguish measured results from recommendations. Avoid claiming causation without supporting evidence. Do not invent explanations.
         """
 
         required_prefixes = [
@@ -453,8 +486,6 @@ class InsightEngine:
                 temperature=0.2
             )
             text = response.choices[0].message.content
-            print("GROQ MODEL:", self.model_name)
-            print("RAW GROQ RESPONSE:", repr(text))
             
             if text:
                 lines = [
@@ -467,18 +498,13 @@ class InsightEngine:
                 current_card = None
 
                 for line in lines:
-                    # Remove bullet points and numbered-list prefixes.
                     line = line.lstrip("•-*0123456789. ").strip()
-
-                    # Remove leading Markdown formatting.
                     line = line.replace("**", "").replace("__", "").strip()
                     line = line.replace("`", "").strip()
 
-                    # Remove an optional lightbulb prefix.
                     if line.startswith("💡 "):
                         line = line[2:].strip()
 
-                    # Start a new card when a required heading is found.
                     matched_prefix = next(
                         (
                             prefix
@@ -494,16 +520,13 @@ class InsightEngine:
 
                         current_card = line
                     elif current_card:
-                        # Preserve the description beneath each heading.
                         cleaned_line = line.replace("**", "").strip()
-
                         if cleaned_line:
                             current_card += " " + cleaned_line
 
                 if current_card:
                     validated_cards.append(current_card.strip())
 
-                # Validate five non-empty cards in the correct order.
                 if (
                     len(validated_cards) == 5
                     and all(
@@ -518,7 +541,6 @@ class InsightEngine:
                     return [f"💡 {card}" for card in validated_cards]
 
         except Exception as e:
-            print("GROQ ERROR:", repr(e))
             logger.exception("Groq API call failed")
 
         # Comprehensive deterministic fallback matching the 5 verified categories in exact order
@@ -526,18 +548,28 @@ class InsightEngine:
         quality = facts.get("data_quality", {})
         cat = facts.get("categorical_patterns", {})
         num = facts.get("numerical_summaries", {})
+        outliers = facts.get("outlier_summaries", {})
         comp = facts.get("category_comparisons", {})
         
         top_miss = quality.get('top_missing_columns', [])
         missing_cols_str = ", ".join([f"{item['column']} ({item['missing_percentage']})" for item in top_miss]) if top_miss else "None"
         
         primary_num_key = list(num.keys())[0] if num else None
-        num_text = f"Primary continuous variable '{primary_num_key}' has a mean of {num[primary_num_key]['mean']:.2f} and median of {num[primary_num_key]['median']:.2f}." if primary_num_key else "No suitable continuous numerical columns available."
+        if primary_num_key:
+            num_stat = num[primary_num_key]
+            outlier_stat = outliers.get(primary_num_key, {})
+            num_text = (
+                f"Continuous variable '{primary_num_key}' has a mean of {num_stat['mean']:.2f}, "
+                f"median of {num_stat['median']:.2f}, and logged {outlier_stat.get('count', 0):,} IQR outliers "
+                f"({outlier_stat.get('percentage', '0.00%')})."
+            )
+        else:
+            num_text = "No suitable continuous numerical columns available for statistical analysis."
 
         comp_text = "No suitable group comparisons available."
         comparison_parts = []
         
-        # Binary outcome comparisons
+        # Binary outcome comparisons (e.g., cancellation rates across groups)
         binary_comparisons = comp.get("binary_group_comparison", {})
         for target_column, bg in binary_comparisons.items():
             res_str = ", ".join(
@@ -573,8 +605,6 @@ class InsightEngine:
             )
         else:
             cat_text = "No suitable categorical column was available for category analysis."  
-            
-        print("USING DETERMINISTIC FALLBACK")  
 
         return [
             f"💡 📊 Dataset Overview — The dataset contains {overview.get('rows', 0):,} rows and {overview.get('columns', 0)} columns ({overview.get('total_cells', 0):,} total cells).",
